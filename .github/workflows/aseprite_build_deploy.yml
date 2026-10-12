@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   build:
+    name: Build Aseprite
     runs-on: windows-2022
     timeout-minutes: 120
 
@@ -22,75 +23,118 @@ jobs:
 
       - name: Install Ninja
         shell: pwsh
-        run: choco install ninja -y --no-progress
+        run: |
+          choco install ninja -y --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Download compatible Skia
         shell: bash
         working-directory: aseprite
         run: |
+          set -e
+
           SKIA_URL=$(bash laf/misc/skia-url.sh Release)
+
           echo "Skia URL: $SKIA_URL"
-          curl -fL --retry 3 -o skia.zip "$SKIA_URL"
-          mkdir skia
+
+          curl -fL --retry 3 \
+            -o skia.zip "$SKIA_URL"
+
+          mkdir -p skia
           unzip -q skia.zip -d skia
 
-      
-      - name: Configure Aseprite
+      - name: Find Visual Studio
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $vsPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          $vswhere = Join-Path `
+            ${env:ProgramFiles(x86)} `
+            "Microsoft Visual Studio\Installer\vswhere.exe"
+
+          if (!(Test-Path $vswhere)) {
+            throw "vswhere.exe not found"
+          }
+
+          $vsInstall = & $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+
+          if (!$vsInstall) {
+            throw "Visual Studio C++ tools not found"
+          }
+
+          $vsPath = Join-Path $vsInstall `
+            "VC\Auxiliary\Build\vcvars64.bat"
 
           if (!(Test-Path $vsPath)) {
-            throw "Visual Studio C++ build tools not found"
+            throw "vcvars64.bat not found"
           }
 
-          $skia = "${{ github.workspace }}/aseprite/skia"
+          Write-Host "Visual Studio: $vsInstall"
 
-          $cmd = "call `"$vsPath`" && cmake -S aseprite -B aseprite/build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DLAF_BACKEND=skia -DSKIA_DIR=`"$skia`" -DSKIA_LIBRARY_DIR=`"$skia/out/Release-x64`" -DENABLE_SCRIPTING=ON"
+          "VS_VCVARS=$vsPath" >> $env:GITHUB_ENV
 
-          cmd /c $cmd
+      - name: Configure and Build Aseprite
+        shell: cmd
+        run: |
+          call "%VS_VCVARS%"
+          if errorlevel 1 exit /b 1
 
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
+          echo Checking MSVC compiler...
+          where cl
+          if errorlevel 1 exit /b 1
 
+          echo Configuring Aseprite...
 
-      
-      - name: Build Aseprite
+          cmake -S aseprite -B aseprite/build-msvc -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_C_COMPILER=cl ^
+            -DCMAKE_CXX_COMPILER=cl ^
+            -DLAF_BACKEND=skia ^
+            -DSKIA_DIR="%GITHUB_WORKSPACE%\aseprite\skia" ^
+            -DSKIA_LIBRARY_DIR="%GITHUB_WORKSPACE%\aseprite\skia\out\Release-x64" ^
+            -DENABLE_SCRIPTING=ON
+
+          if errorlevel 1 exit /b 1
+
+          echo Building Aseprite...
+
+          cmake --build aseprite/build-msvc ^
+            --target aseprite ^
+            --parallel 4
+
+          if errorlevel 1 exit /b 1
+
+      - name: Verify executable
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $exe = "aseprite/build-msvc/bin/aseprite.exe"
 
-          $vsPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-
-          if (!(Test-Path $vsPath)) {
-            throw "Visual Studio C++ build tools not found"
+          if (!(Test-Path $exe)) {
+            throw "aseprite.exe not found"
           }
 
-          $cmd = "call `"$vsPath`" && cmake --build aseprite/build --target aseprite --parallel 4"
-
-          cmd /c $cmd
-
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-
+          Write-Host "Aseprite build completed."
 
       - name: Package executable
         shell: pwsh
         run: |
-          $bin = "aseprite/build/bin"
-          if (!(Test-Path "$bin/aseprite.exe")) {
-            throw "aseprite.exe not found"
-          }
-          Compress-Archive -Path "$bin/*" `
-            -DestinationPath "aseprite-windows.zip"
+          $bin = "aseprite/build-msvc/bin"
 
-      - name: Upload private build artifact
+          Compress-Archive `
+            -Path "$bin/*" `
+            -DestinationPath "aseprite-windows.zip" `
+            -Force
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: aseprite-windows
           path: aseprite-windows.zip
           retention-days: 1
+          if-no-files-found: error
