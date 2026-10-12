@@ -57,11 +57,26 @@ jobs:
           }
 
 
+      
       - name: Build Aseprite
         shell: pwsh
         run: |
-          cmake --build aseprite/build --target aseprite
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $ErrorActionPreference = "Stop"
+
+          $vsPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+
+          if (!(Test-Path $vsPath)) {
+            throw "Visual Studio C++ build tools not found"
+          }
+
+          $cmd = "call `"$vsPath`" && cmake --build aseprite/build --target aseprite --parallel 4"
+
+          cmd /c $cmd
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
 
       - name: Package executable
         shell: pwsh
